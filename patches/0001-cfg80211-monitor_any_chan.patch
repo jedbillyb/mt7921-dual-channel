@@ -1,0 +1,42 @@
+--- a/net/wireless/chan.c	2026-08-02 23:16:08.839758228 +1200
++++ b/net/wireless/chan.c	2026-08-02 23:16:07.990762218 +1200
+@@ -11,10 +11,30 @@
+ 
+ #include <linux/export.h>
+ #include <linux/bitfield.h>
++#include <linux/moduleparam.h>
+ #include <net/cfg80211.h>
+ #include "core.h"
+ #include "rdev-ops.h"
+ 
++/*
++ * Allow NL80211_CMD_SET_CHANNEL on a monitor interface even when non-monitor
++ * interfaces are running on the same wiphy.
++ *
++ * Upstream refuses this unconditionally, because on a single-channel radio
++ * retuning the monitor retunes the whole PHY and would silently drop an
++ * existing association. That is the right default. It is wrong for AWDL:
++ * AirDrop needs to watch a social channel (6/44/149) that is chosen by the
++ * peer, while the station stays associated to an AP on an unrelated channel.
++ *
++ * This is opt-in and off by default. Turning it on hands the caller a radio
++ * the kernel will no longer protect: whether the second channel is actually
++ * serviced is a property of the driver and firmware, not of this check.
++ */
++static bool monitor_any_chan;
++module_param(monitor_any_chan, bool, 0644);
++MODULE_PARM_DESC(monitor_any_chan,
++		 "allow setting a monitor interface's channel while non-monitor interfaces are running (unsafe: may retune the PHY out from under an association)");
++
+ static bool cfg80211_valid_60g_freq(u32 freq)
+ {
+ 	return freq >= 58320 && freq <= 70200;
+@@ -1547,7 +1567,7 @@
+ {
+ 	if (!rdev->ops->set_monitor_channel)
+ 		return -EOPNOTSUPP;
+-	if (!cfg80211_has_monitors_only(rdev))
++	if (!cfg80211_has_monitors_only(rdev) && !monitor_any_chan)
+ 		return -EBUSY;
+ 
+ 	return rdev_set_monitor_channel(rdev, dev, chandef);
