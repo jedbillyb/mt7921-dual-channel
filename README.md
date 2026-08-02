@@ -141,8 +141,29 @@ make olddefconfig
 make -s kernelrelease        # must print 6.18.33_1, i.e. `uname -r`
 
 make -j16 modules_prepare
+make M=net/wireless clean                      # see below - do NOT skip
 KBUILD_MODPOST_WARN=1 make -j16 M=net/wireless
+strip --strip-debug net/wireless/cfg80211.ko
 ```
+
+**Never build this directory twice without cleaning.** The obvious sequence —
+run `make M=net/wireless`, watch modpost fail on unresolved symbols, re-run it
+with `KBUILD_MODPOST_WARN=1` — produces a module that builds cleanly, passes
+`modinfo`, matches vermagic, and then dies at `insmod` with:
+
+```
+Invalid module format
+module: x86/modules: Invalid relocation target, existing value is nonzero for type 1
+```
+
+Type 1 is `R_X86_64_64`: the second pass incrementally re-links `cfg80211.o`
+into itself and applies the relocations twice. The tell is that a correct build
+prints `LD [M] cfg80211.o` *and* `LD [M] cfg80211.ko`; the bad one only prints
+the latter, because it reused the stale object.
+
+`strip --strip-debug` is cosmetic but worth it: `olddefconfig` re-enables
+`CONFIG_DEBUG_INFO` through a `select` even after `scripts/config --disable`,
+giving a 25 MB module. Stripped it is 2.7 MB, against 3.08 MB for stock.
 
 `KBUILD_MODPOST_WARN=1` is required and is safe **only because MODVERSIONS is
 off**: there is no `Module.symvers` from a vmlinux build, so modpost cannot
