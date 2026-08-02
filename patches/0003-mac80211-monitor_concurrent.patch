@@ -1,0 +1,50 @@
+--- a/b/net/mac80211/iface.c	2026-08-02 23:43:02.558174318 +1200
++++ b/net/mac80211/iface.c	2026-08-02 23:39:37.258139100 +1200
+@@ -16,6 +16,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/kcov.h>
++#include <linux/moduleparam.h>
+ #include <net/mac80211.h>
+ #include <net/ieee80211_radiotap.h>
+ #include "ieee80211_i.h"
+@@ -1180,6 +1181,29 @@
+ 	ieee80211_link_init(sdata, -1, &sdata->deflink, &sdata->vif.bss_conf);
+ }
+ 
++/*
++ * Create the virtual monitor even when non-monitor interfaces are running.
++ *
++ * Upstream only creates it when local->open_count == 0. That is deliberate:
++ * on a single-channel radio the monitor's channel context is the radio's
++ * channel, so allowing one alongside an association means the association can
++ * be retuned out from under itself.
++ *
++ * Without the virtual monitor, local->monitor_sdata is NULL and
++ * ieee80211_set_monitor_channel() takes its `goto done` path: it records the
++ * requested channel, returns 0, and never reaches the driver. So a monitor
++ * retune "succeeds" while the hardware never moves - which is indistinguishable
++ * from a driver that ignored the request.
++ *
++ * Needed for AWDL: AirDrop must watch a social channel (6/44/149) picked by the
++ * peer while the station stays associated on an unrelated channel. Off by
++ * default; see also cfg80211.monitor_any_chan, which lifts the outer gate.
++ */
++static bool monitor_concurrent;
++module_param(monitor_concurrent, bool, 0644);
++MODULE_PARM_DESC(monitor_concurrent,
++		 "create the virtual monitor interface even when non-monitor interfaces are running (unsafe: single-channel hardware may retune the association)");
++
+ int ieee80211_add_virtual_monitor(struct ieee80211_local *local)
+ {
+ 	struct ieee80211_sub_if_data *sdata;
+@@ -1400,7 +1424,8 @@
+ 			if (res)
+ 				goto err_stop;
+ 		} else {
+-			if (local->virt_monitors == 0 && local->open_count == 0) {
++			if (local->virt_monitors == 0 &&
++			    (local->open_count == 0 || monitor_concurrent)) {
+ 				res = ieee80211_add_virtual_monitor(local);
+ 				if (res)
+ 					goto err_stop;

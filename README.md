@@ -1,5 +1,27 @@
 # mt7921-awdl-kernel
 
+> ## Result: it does not work, and the reason is the firmware
+>
+> All three gates were found, patched and verified to execute. With the full
+> chain running — `set_monitor_channel` → `new_chanctx` → `mt7921_add_chanctx` →
+> `mt7921_assign_vif_chanctx` → **`mt7921_mcu_config_sniffer`** (confirmed by
+> ftrace) — the MCU command **returns success** and the firmware carries on
+> receiving the associated BSS's channel.
+>
+> Measured: associated on ch2 (2417 MHz), monitor requested on ch149 (5745 MHz).
+> 593 of 593 captured frames were 2417 MHz. Zero on 5745. The association
+> survived throughout at 0% packet loss.
+>
+> **The mt7921 firmware's sniffer channel is not independent of the BSS
+> channel.** No kernel patch can fix that from above. The patches here are kept
+> because the analysis is reusable and the negative result is worth not
+> re-deriving, but they are **not** a working feature and should not be loaded
+> expecting one.
+>
+> What still works is the userspace approach in
+> [`airdrop-mt7921`](../airdrop-mt7921): AirDrop succeeds when the phone's AWDL
+> lands on the channel the AP is already using.
+
 Kernel-side work to let a **single MT7921** do Wi-Fi and AWDL/AirDrop at the
 same time, with no second radio and no router configuration.
 
@@ -214,3 +236,81 @@ Three outcomes, and the middle one is the trap:
 Only a radiotap capture distinguishes the last two. Do not trust `iw dev mon0
 info` alone — it reports what the kernel believes, which is exactly what is in
 question.
+
+## What actually happened: three gates, not one
+
+Each patch removed a gate and revealed the next one below it. All three had to
+be found empirically; reading alone would not have got there, because each gate
+fails by **succeeding**.
+
+**Gate 1 — cfg80211.** `cfg80211_has_monitors_only()`. Patch 0001. After it,
+`iw set freq` returned 0 instead of EBUSY. Capture: still 100% on the AP's
+channel. ftrace showed **no driver function ran at all**.
+
+**Gate 2 — mac80211.** `net/mac80211/iface.c:1403`:
+
+```c
+if (local->virt_monitors == 0 && local->open_count == 0)
+        res = ieee80211_add_virtual_monitor(local);
+```
+
+The virtual monitor is only created when nothing else is up. With an
+association, `local->monitor_sdata` stays NULL, and
+`ieee80211_set_monitor_channel()` hits its `goto done`: record the channel,
+return 0, never reach the driver. Patch 0003 (`mac80211.monitor_concurrent=1`).
+
+**Gate 3 — the driver.** `mt7921_mcu_config_sniffer()` is reachable only from
+`->change_chanctx`, which a *newly created* context never triggers. So even
+with a monitor chanctx, the firmware was never told. Patch 0002 calls it from
+`->assign_vif_chanctx`.
+
+With all three, ftrace confirms the complete chain executes and the MCU command
+returns success. The radio still does not move. **Gate 4 is the firmware, and
+it is not patchable from the kernel.**
+
+## Reproducing the negative result
+
+```sh
+sudo scripts/reload-stack.sh          # loads all three, auto-rollback on no link
+PHY=$(iw phy | grep -oP '^Wiphy \K.*' | head -1)   # renumbers on driver reload
+sudo iw phy "$PHY" interface add mon0 type monitor && sudo ip link set mon0 up
+sudo iw dev mon0 set freq 5745
+sudo timeout 20 tcpdump -i mon0 -e -n -c 600 2>/dev/null \
+  | grep -oE '[0-9]{4} MHz' | sort | uniq -c | sort -rn
+```
+
+To restore stock: `modprobe -r mt7921e mt7921_common mt792x_lib
+mt76_connac_lib mt76 mac80211 cfg80211` then `modprobe cfg80211 mac80211
+mt7921e`. Nothing was ever written to `/lib/modules`, so a reboot also suffices.
+
+## Gotcha that cost the most time: vermagic is necessary, not sufficient
+
+`MODVERSIONS` being off means no symbol CRCs — but it also means **nothing
+checks that your config matches the running kernel's**. Building with
+`CONFIG_DEBUG_INFO_BTF_MODULES` disabled removes four fields from
+`struct module`:
+
+```c
+#ifdef CONFIG_DEBUG_INFO_BTF_MODULES
+	unsigned int btf_data_size;      /* module.h:511 */
+	unsigned int btf_base_data_size;
+	void *btf_data;
+	void *btf_base_data;
+#endif
+```
+
+`init` sits at module.h:458, *before* that block; `exit` at :572, *after* it.
+So the struct shrinks by 24 bytes and the `.gnu.linkonce.this_module`
+relocation for `exit` lands 24 bytes early, inside a field the loader has
+already written. Result:
+
+```
+insmod: ERROR: could not insert module: Invalid module format
+module: x86/modules: Invalid relocation target, existing value is nonzero for type 1
+```
+
+It affects **every** module built that way, not just the one you care about —
+verify with a throwaway like `crypto/michael_mic.ko`, which costs no network.
+The `.ko` is clean on disk; the fault only appears at load. **Build with
+`/proc/config.gz` verbatim.** `pahole` is installed here, and module BTF
+generation skips itself gracefully when `vmlinux` is absent.
