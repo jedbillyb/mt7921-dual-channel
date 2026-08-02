@@ -1,146 +1,213 @@
-# Handoff — session of 2026-08-02
+# Handoff — session of 2026-08-03
 
-Read this first, then `README.md` for the detail. Companion userspace project is
-`/mnt/shared/projects/airdrop-mt7921` (FINDINGS §43, §44, §45).
+Read this first, then `README.md`. Companion userspace project is
+`/mnt/shared/projects/airdrop-mt7921` (FINDINGS §43–§46).
+
+**This supersedes the 2026-08-02 handoff.** That document proposed the P2P-GO
+experiment, called it "maybe-promising, not likely", and left it unstarted.
+It was run on 2026-08-03. **It works.**
 
 ## The question
 
 Make a **single MT7921** do Wi-Fi and AirDrop/AWDL at the same time, with no
-second radio and no router configuration. AirDrop must watch a social channel
-(6/44/149) chosen by the *phone*, while the station stays associated to an AP on
-an unrelated channel.
+second radio and no router configuration.
 
-## What was settled tonight
+## ANSWERED: yes, on a STOCK KERNEL
 
-**Monitor-mode route: closed. Verified, not inferred.**
+Measured on ch149 (5745) while associated to `student` on ch52 (5260).
+**Nothing was written to `/lib/modules`. No kernel module was patched or even
+rebuilt.** The only patched component is hostapd.
 
-Three kernel gates block it. Each was found, patched, and confirmed by ftrace to
-execute. Each one **fails by succeeding** — returns 0, logs nothing — which is
-why this took four rounds of patch-and-measure rather than one reading of the
-source.
+| | monitor vif (2026-08-02) | P2P-GO vif (this session) |
+|---|---|---|
+| kernel accepts | only after 3 patches | **yes, stock** |
+| radio actually moves | **no** — 593/593 on AP chan | **yes** |
+| RX on 149 | 0 frames | **222 frames, 75 from external devices** |
+| TX on 149 | never reached | **82 solicited probe responses, 5 APs** |
+| AWDL peers | — | **4 discovered, sync locked** |
+| AWDL data path | — | **iPhone replied to ping6, 460 ms** |
+
+Uplink survived every run: 0% packet loss throughout.
+
+## The two mechanisms
+
+### 1. P2P-GO is the only iftype that gets two channels
+
+`iw phy phy0 info` interface combinations:
+
+```
+* #{managed,P2P-client} <= 2, #{P2P-GO} <= 1, #{P2P-device} <= 1,
+  total <= 3, #channels <= 2      <-- two channels, P2P-GO only
+* #{managed,P2P-client} <= 2, #{AP} <= 1, #{P2P-device} <= 1,
+  total <= 3, #channels <= 1      <-- plain AP is single-channel
+```
+
+hostapd **unconditionally forces iftype AP**, so out of the box you get
+`nl80211: Beacon set failed: -16 (Device or resource busy)`.
+
+`patches/0004-hostapd-p2p-go-iftype.patch` makes hostapd keep `P2P_GO` when
+`HOSTAPD_P2P_GO=1`. `is_ap_interface()` already accepts `P2P_GO`, so nothing
+else in hostapd changes. Built at `/mnt/shared/build/hostapd-2.11`.
+
+### 2. Monitor TX borrows another vif's chanctx BY MAC ADDRESS
+
+`ieee80211_monitor_start_xmit()` (`net/mac80211/tx.c:~2377`) loops
+`local->interfaces` and, if an injected frame's `addr2` equals a **running
+non-monitor vif's** MAC, uses that sdata's chanctx. Monitor vifs are explicitly
+skipped by the loop, so **aliasing a monitor vif's MAC to the GO's is safe and
+is the whole integration trick.**
+
+No MAC match → falls back to `local->monitor_sdata` (only exists when
+`open_count == 0`) → else `goto fail_rcu`.
+
+## THE SILENT-DROP TRAP — cost one void test
+
+While associated, an injected frame from a monitor vif is dropped inside
+mac80211 with **`tx_packets`, `tx_dropped` AND `tx_errors` all staying 0**, and
+`socket.send()` returning success. No error anywhere, no dmesg line.
+
+The first TX test read as "MCC TX doesn't work". **The control — same injection
+with no GO at all — also gave zero**, proving the monitor-TX path was at fault,
+not MCC. Then injecting with the GO's MAC gave 82 responses vs 0 for an invented
+MAC. **Always run the no-GO control before blaming the channel.**
+
+## Working recipe
+
+```sh
+PHY=$(iw phy | grep -oP '^Wiphy \K.*' | head -1)
+sudo iw phy $PHY interface add go0 type __p2pgo && sudo ip link set go0 up
+GOMAC=$(cat /sys/class/net/go0/address)
+sudo -E env HOSTAPD_P2P_GO=1 /mnt/shared/build/hostapd-2.11/hostapd/hostapd \
+     scripts/hostapd-149.conf &
+# wait for AP-ENABLED, then:
+sudo iw phy $PHY interface add mon0 type monitor
+sudo ip link set mon0 down
+sudo ip link set mon0 address "$GOMAC"      # <-- the trick
+sudo ip link set mon0 up
+sudo sh -c "echo 0 > /sys/kernel/debug/ieee80211/$PHY/mt76/runtime-pm"
+sudo sh -c "echo 0 > /sys/kernel/debug/ieee80211/$PHY/mt76/deep-sleep"
+sudo /usr/local/bin/airdrop-owl -i mon0 -c 149 -N -vv
+```
+
+`scripts/gomode2.sh` does all of this plus ping6 and cleanup.
+`iw dev mon0 set freq` is **still EBUSY** and `mon0` **still reports no
+channel** — the kernel's story never changed, the radio's behaviour did. Do not
+use `iw` as evidence here.
+
+## THE COST — this is the open design problem
+
+| | uplink to gateway |
+|---|---|
+| baseline | ~2.6 ms avg, 7.6 ms max |
+| GO up on a different channel | **~40 ms median, 280–590 ms max** |
+
+0% packet loss, pure latency. Fine for browsing/streaming, **bad for Discord VC
+and Minecraft** — which is the user's existing sore point (see the onboard
+mt7921 jitter notes). A permanently-armed GO on a non-AP channel is therefore
+not acceptable as-is.
+
+macOS pays the same cost — one radio, same physics. Apple hides it by not
+keeping AWDL up (BLE-triggered, torn down after) and by sequence design.
+
+## NEXT: "always armed at zero cost" — the slot-8 plan (NOT YET TESTED)
+
+**If the GO sits on the AP's own channel there is no time-slicing at all** —
+one channel, zero cost, AWDL genuinely up 24/7.
+
+The enabling fact, from our own captures: **slot 8 is always the 2.4 GHz social
+slot.** Every peer sequence ever recorded:
+
+```
+112,112,149,0,0,0,0,112,6,112,149,112,0,0,0,112
+ 36, 36,149,0,0,0,0, 36,6, 36,149, 36,0,0,0, 36
+```
+
+ch6 at slot 8, both times. Structure, not luck.
+
+**Plan A (zero cost, always armed):** at home, move `2142-WiFi`'s 2.4 GHz BSS
+from **ch2 to ch6**, park the GO on ch6. Note this is NOT §40b's rejected
+proposal (which moved 5 GHz to 149 and depended on where the phone roams) — it
+is a one-click change to a band not used for throughput, and slot 8 is always
+2.4 GHz regardless of roaming. Downside: 1/16 slots ≈ 6% duty ≈ ~22 kB/s
+(extrapolated from the 2/16 → 45 kB/s baseline). Fine for discovery, slow for
+a photo.
+
+**Plan B (removes Plan A's downside):** hostapd `chan_switch` (CSA) to move the
+GO to the phone's dominant channel for the duration of a transfer, then back.
+Pay the 40 ms only while a file is actually moving. **Untested — unknown
+whether mt7921 honours CSA on a GO.**
+
+**Plan C (polish):** wire up Opportunistic Power Save. The chain is built except
+the last hop:
+- firmware command exists: `MCU_CE_CMD(SET_P2P_OPPPS)`
+- driver function exists and is exported:
+  `mt76_connac_mcu_set_p2p_oppps()` (`mt76_connac_mcu.c:2320`)
+- hostapd implements the userspace side (`src/ap/p2p_hostapd.c`, `set_noa`)
+- **but only mt7615 calls it** (`mt7615/main.c:591`).
+  `mt7921_bss_info_changed()` handles `ERP_SLOT/BEACON/QOS/PS/CQM/ASSOC/
+  ARP_FILTER` and **not `BSS_CHANGED_P2P_PS`.**
+
+~5 lines copying mt7615's pattern. **Caution: this chip's signature failure is
+accepting an MCU command and ignoring it** — `MCU_UNI_CMD(SNIFFER)` returned
+success three times while the radio sat still. Verify by measurement, not by
+return code. Full NoA is not in mt76 for any chip.
+
+## Also still open
+
+- **A real file transfer has NOT been done in GO mode.** ping6 got 1/5 replies
+  (80% loss) — categorical PASS per §23/§26, but ping6 **cannot size an effect**.
+  The 80% is explained: the phone offered ch149 only 2/16 slots that run
+  (112 was dominant at 6/16), and we shared those with the AP.
+- `.venv-opendrop` is **missing** from the airdrop-mt7921 repo and must be
+  rebuilt with the three patches before any transfer test.
+- **SECURITY, blocks anything always-on:** opendrop's `handle_ask` in
+  `server.py` unconditionally accepts — no prompt, no hook.
+  `patches/opendrop-ask-confirm.patch` exists but is not applied.
+- Active-monitor (`flags active`) ACKs against a GO-held chanctx: untested.
+  If unicast fails, try the §14 PAIR with both vifs MAC-aliased.
+
+## Superseded, but still true: the MONITOR route is closed
+
+Do not re-attempt retuning a monitor vif while associated. Three gates found,
+patched, ftrace-confirmed to execute, `MCU_UNI_CMD(SNIFFER)` returns success,
+**radio does not move** (593/593 frames on the AP's channel).
 
 | # | layer | gate | patch |
 |---|---|---|---|
-| 1 | cfg80211 | `cfg80211_has_monitors_only()` (`net/wireless/chan.c:1550`) | 0001, `monitor_any_chan` |
-| 2 | mac80211 | virtual monitor created only when `open_count == 0` (`net/mac80211/iface.c:1403`) | 0003, `monitor_concurrent` |
-| 3 | mt7921 | `mt7921_mcu_config_sniffer()` reachable only from `->change_chanctx`, never for a newly created chanctx | 0002, call it from `->assign_vif_chanctx` |
+| 1 | cfg80211 | `cfg80211_has_monitors_only()` (`net/wireless/chan.c:1550`) | 0001 |
+| 2 | mac80211 | virtual monitor only when `open_count == 0` (`iface.c:1403`) | 0003 |
+| 3 | mt7921 | `mt7921_mcu_config_sniffer()` only from `->change_chanctx` | 0002 |
 
-With all three loaded, ftrace shows the complete chain running down to
-`mt7921_mcu_config_sniffer <-mt7921_assign_vif_chanctx`, and
-`MCU_UNI_CMD(SNIFFER)` **returns success**.
+Patches 0001–0003 are kept as the documented negative result. **They are no
+longer needed for anything.**
 
-**The radio does not move.** Associated on ch2 (2417 MHz), monitor requested on
-ch149 (5745 MHz): **593 of 593 captured frames were 2417 MHz, zero on 5745**,
-association intact at 0% packet loss throughout.
-
-## Why — and this is the useful part
-
-Firmware analysis (`/lib/firmware/mediatek/WIFI_RAM_CODE_MT7961_1.bin.zst`,
-792 KB decompressed):
-
-- **Not encrypted.** Debug strings, format strings and MediaTek's internal build
-  paths are all readable, e.g.
-  `build/csp/7961/asic2.0/projects/wifi_mobile_ram_ccn16/.../hal_cal_flow.c`.
-- **It is RAM code, re-uploaded from disk at every boot.** Nothing is flashed,
-  so a bad firmware patch **cannot brick the card** — the driver just fails to
-  init, and restoring the file fixes it.
-- Trailer is `____010000` + build date `20260224110949` + a 4-byte CRC
-  (`8a a4 75 57`), matching what the driver prints at probe. A CRC, not
-  obviously a cryptographic signature. Whether the ROM enforces a signature is
-  **untested**.
-- It contains a **channel manager with time-slicing**:
-  `CnmFastChReqQuotaInUs`, `CnmGOAbsenceMarginInUs`, `EnCnmDoubleWFDCHtime`,
-  `EnCnmSyncTBTT`, `fgCnmForceEarlyAbortCH`. Quota, absence margin, TBTT sync,
-  early channel abort. The `GO`/`WFD` naming ties it to P2P Group Owner and
-  Wi-Fi Direct — exactly the driver's advertised
-  `#{managed} + #{P2P-GO}, #channels <= 2`.
-- It contains **zero sniffer strings**.
-
-So the conclusion is sharper than "the chip can't do two channels". **The chip
-can — the sniffer just isn't a client of the scheduler that does it.** The
-capability exists; monitor mode cannot reach it.
-
-Also present, and worth not misreading: `DBDC band :%d not support in MT7961`.
-That rules out two *bands* simultaneously (needs two RF chains). It does not
-rule out CNM time-slicing two channels on one chain, which is the thing we want.
-
-## Next thing to try (not started)
-
-Get AWDL onto a vif type **CNM will schedule** — a P2P-GO — rather than a
-monitor vif. No firmware work, no reverse engineering.
-
-**Experiment:** bring up a P2P-GO on ch149 while associated on ch36, and confirm
-by capture that both channels are genuinely serviced.
-
-- Needs `hostapd`, or a `wpa_supplicant` rebuilt with P2P. **This box's
-  `wpa_supplicant` has no P2P compiled in** — `p2p_group_add` is absent from the
-  daemon and present only in `wpa_cli`. `xbps-install` is already NOPASSWD here.
-- If both channels are serviced, there is a real path. If not, the whole
-  approach is closed and firmware editing would not have rescued it either.
-
-**Honest caveat, do not skip:** even if CNM services ch149, OWL still needs raw
-injection and reception there, and a monitor vif would still follow the sniffer
-channel — which is the thing we just proved is tied to the BSS. Whether that gap
-is bridgeable is a *second* unknown. This is maybe-promising, not likely.
-
-I earlier proposed this experiment, then cancelled it on the grounds that the
-interface-combination table is not consulted for monitor vifs. That is true but
-turned out to be beside the point: it is the *sniffer* that is unwired, not the
-combination table that is blocking. The experiment is back on.
-
-## Firmware editing verdict
-
-Possible in principle — unencrypted, analyzable, and not a bricking risk. But it
-is months of reverse-engineering a stripped ~792 KB binary for an undocumented
-MCU with no symbols. **Wrong target.** The CNM finding above is the cheaper
-route to the same goal.
+Firmware analysis stands: unencrypted RAM code, re-uploaded each boot, cannot
+brick; CNM time-slicing scheduler present (`CnmFastChReqQuotaInUs`,
+`CnmGOAbsenceMarginInUs`, `EnCnmSyncTBTT`); **zero sniffer strings** — which is
+precisely why P2P-GO works and monitor does not. **Firmware editing is now
+moot.**
 
 ## State of the machine
 
-Left **clean**. Verified at end of session:
+Left clean and verified: stock modules, no leftover vifs, no hostapd running,
+`wlp2s0` associated and passing traffic at 0% loss, nothing in `/lib/modules`.
 
-- Stock `cfg80211` / `mac80211` / `mt7921e` loaded; patched module parameters
-  absent from `/sys/module/*/parameters/`.
-- No leftover monitor vifs; only `wlp2s0`, type managed.
-- ftrace reset to `nop`, filter cleared, `tracing_on=0`.
-- Associated, `192.168.68.62`, 0% packet loss.
-- **Nothing was ever written to `/lib/modules`**, so a reboot is a full reset
-  regardless.
+`/mnt/shared/kernel/linux-6.18.33` is **2.3 GB and now safe to delete** — no
+kernel patching is required by the working solution. `/` is at 95%.
+`/mnt/shared/build/{hostapd-2.11,wpa_supplicant-2.11}` hold the hostapd build
+(needed) and a P2P-enabled wpa_supplicant build (turned out unnecessary).
 
-`tracefs` was mounted at `/sys/kernel/tracing` during the session (it was not
-mounted by default on this box; `debugfs` was). Harmless, and gone on reboot.
+## Traps already paid for
 
-## Where things live
-
-| what | where |
-|---|---|
-| Kernel patches, scripts, analysis | `/mnt/shared/projects/mt7921-awdl-kernel` (committed, **no GitHub remote — deliberately local**) |
-| Userspace AirDrop stack | `/mnt/shared/projects/airdrop-mt7921` (committed and pushed) |
-| Kernel source tree, built modules | `/mnt/shared/kernel/linux-6.18.33` — **2.3 GB**, safe to delete, README documents the rebuild |
-
-`/` is at **95%** (2.6 GB free). Keep all kernel work on `/mnt/shared`.
-
-## Traps already paid for — do not re-learn these
-
-1. **Vermagic matching is necessary, not sufficient.** With `CONFIG_MODVERSIONS`
-   off there are no symbol CRCs, and *nothing* checks that your config matches
-   the running kernel. Disabling `CONFIG_DEBUG_INFO_BTF_MODULES` removes 4
-   fields from `struct module` (`module.h:511`); `init` is at :458 (before the
-   block) and `exit` at :572 (after), so `exit`'s relocation lands 24 bytes
-   early in a field the loader already wrote →
-   `Invalid module format` / `Invalid relocation target ... nonzero for type 1`,
-   for **every** module built that way. **Build with `/proc/config.gz`
-   verbatim.** `pahole` is installed; module BTF skips itself when `vmlinux` is
-   absent.
-2. **Test module loading with `crypto/michael_mic.ko`,** not the Wi-Fi stack. It
-   reproduces load failures at zero cost instead of dropping your network.
-3. **Never build `M=<dir>` twice without `make M=<dir> clean`** — the second
-   pass re-links incrementally and double-applies relocations.
-4. **The phy renumbers on driver reload** (`phy0` → `phy1`). Always re-read it:
-   `PHY=$(iw phy | grep -oP '^Wiphy \K.*' | head -1)`.
-5. **`iw dev mon0 info` reports what the kernel believes,** which is precisely
-   what is in question. Only a radiotap capture is evidence. Use ftrace to
-   confirm a code path actually ran before trusting any "success".
-6. The reload scripts were **blocked by the Claude Code permission classifier**
-   until the user granted permission explicitly. They all auto-roll-back to the
-   stock stack if the link does not return within 45 s.
+1. **`iw` lies.** `iw dev mon0 info` reports what the kernel believes, which is
+   exactly what is in question. Only radiotap frequencies are evidence.
+2. **Silent TX drop** — see above. Counters stay 0, `send()` succeeds.
+3. **hostapd's stock `defconfig` lacks `CONFIG_IEEE80211AC`** — `ieee80211ac=1`
+   in the conf is a fatal "unknown configuration item".
+4. **hostapd renames the vif on exit** — `udevd: could not rename interface
+   'go0' to 'wlp2s0': File exists` appears in dmesg; harmless.
+5. Test scripts must have a `trap` on EXIT/INT/TERM **plus** a `setsid`-detached
+   watchdog; a trap cannot survive `kill -9`. All scripts here do.
+6. If a kernel rebuild is ever needed again: use `/proc/config.gz` verbatim,
+   test loads with `crypto/michael_mic.ko`, never build `M=<dir>` twice without
+   cleaning, and note **phy renumbers phy0→phy1 on driver reload**.
