@@ -6,9 +6,9 @@
 > warranty, and no promise that any of this works on your hardware or
 > regulatory domain. Issues and PRs may sit unread.
 >
-> The userspace side that actually uses this —
-> [`airdrop-mt7921`](https://github.com/jedbillyb/airdrop-mt7921) — and the
-> AWDL protocol engine — [`owl`](https://github.com/jedbillyb/owl) — are
+> The userspace side that actually uses this -
+> [`airdrop-mt7921`](https://github.com/jedbillyb/airdrop-mt7921) - and the
+> AWDL protocol engine - [`owl`](https://github.com/jedbillyb/owl) - are
 > separate repos. This one is kernel/driver-level: what makes a single MT7921
 > radio service two Wi-Fi channels at once in the first place.
 
@@ -29,13 +29,13 @@
 > kernel gates were found, patched, and ftrace-confirmed to execute end to
 > end; `MCU_UNI_CMD(SNIFFER)` returns success and the radio never leaves the
 > associated channel (593/593 captured frames stayed on the AP's channel).
-> No kernel patch can fix that — it is a firmware boundary. **Do not
+> No kernel patch can fix that - it is a firmware boundary. **Do not
 > re-attempt or re-derive this; the patches are kept only as a documented
 > negative result.** See "The dead end: monitor-vif retuning" below for the
 > full analysis.
 >
 > Full session detail, open items, and the next-step plans (slot-8 zero-cost
-> parking, CSA, Opportunistic Power Save) live in `HANDOFF.md` — read that
+> parking, CSA, Opportunistic Power Save) live in `HANDOFF.md` - read that
 > first for anything beyond a summary.
 
 Kernel/driver-adjacent work to let a **single MT7921** do Wi-Fi and
@@ -56,7 +56,7 @@ the transfer only sees AWDL when luck lines the channel up.
 
 ## The working solution: P2P-GO + MAC-aliased injection
 
-### Mechanism 1 — P2P-GO is the only iftype that gets a second channel
+### Mechanism 1 - P2P-GO is the only iftype that gets a second channel
 
 `iw phy phy0 info` interface combinations:
 
@@ -74,17 +74,17 @@ hostapd unconditionally forces iftype AP, so out of the box you get
 accepts `P2P_GO`, so no other hostapd path needs changing. Built at
 `/mnt/shared/build/hostapd-2.11`.
 
-### Mechanism 2 — monitor TX borrows another vif's chanctx by MAC address
+### Mechanism 2 - monitor TX borrows another vif's chanctx by MAC address
 
 `ieee80211_monitor_start_xmit()` (`net/mac80211/tx.c:~2377`) resolves an
 injected frame's `addr2` against **running non-monitor vifs**, and uses that
 vif's chanctx if it matches. Monitor vifs are skipped by that lookup, so
 **aliasing a monitor vif's MAC address to the GO's** routes AWDL injection
-onto the GO's channel — the whole integration trick, no driver or firmware
+onto the GO's channel - the whole integration trick, no driver or firmware
 changes involved.
 
 `iw dev mon0 set freq` is still `EBUSY` and `mon0` still reports no channel
-throughout — the kernel's bookkeeping never changes, only the firmware's
+throughout - the kernel's bookkeeping never changes, only the firmware's
 actual behaviour. Don't use `iw` as evidence either way; only a radiotap
 capture shows the truth.
 
@@ -110,7 +110,7 @@ sudo /usr/local/bin/airdrop-owl -i mon0 -c 149 -N -vv
 cleanup (with a `trap`-based teardown and a `setsid`-detached watchdog, since
 a trap alone doesn't survive `kill -9`).
 
-### The cost — open design problem
+### The cost - open design problem
 
 | | uplink to gateway |
 |---|---|
@@ -136,8 +136,8 @@ This was the original approach: retune a **monitor** vif's channel while
 staying associated, rather than using a second vif type. It does not work,
 and the reason is the firmware, not the kernel.
 
-Full chain — `set_monitor_channel` → `new_chanctx` → `mt7921_add_chanctx` →
-`mt7921_assign_vif_chanctx` → `mt7921_mcu_config_sniffer` — was patched
+Full chain - `set_monitor_channel` → `new_chanctx` → `mt7921_add_chanctx` →
+`mt7921_assign_vif_chanctx` → `mt7921_mcu_config_sniffer` - was patched
 through and confirmed by ftrace to execute completely. The MCU command
 **returns success**, and the firmware continues receiving only the
 associated BSS's channel regardless.
@@ -151,7 +151,7 @@ channel.** No kernel patch can fix that from above. Firmware analysis
 (`/lib/firmware/mediatek/WIFI_RAM_CODE_MT7961_1.bin.zst`) found it
 unencrypted RAM code containing a channel manager with time-slicing support
 (`CnmFastChReqQuotaInUs`, `CnmGOAbsenceMarginInUs`, `EnCnmSyncTBTT`) tied to
-P2P/GO naming, but **zero sniffer strings** — which is exactly why the P2P-GO
+P2P/GO naming, but **zero sniffer strings** - which is exactly why the P2P-GO
 route above works and this one doesn't. Editing the firmware to add that
 capability would be months of reverse-engineering a stripped ~792 KB binary
 with no symbols; the P2P-GO route made that moot.
@@ -202,15 +202,15 @@ return rdev->num_running_ifaces == rdev->num_running_monitor_ifaces &&
 ### Three gates, not one
 
 Each patch removed a gate and revealed the next one below it. Each one
-**fails by succeeding** — returns 0, logs nothing — which is why this took
+**fails by succeeding** - returns 0, logs nothing - which is why this took
 several rounds of patch-and-measure rather than one reading of the source.
 
-**Gate 1 — cfg80211.** `cfg80211_has_monitors_only()`. Patch 0001
+**Gate 1 - cfg80211.** `cfg80211_has_monitors_only()`. Patch 0001
 (`cfg80211.monitor_any_chan=1`). After it, `iw set freq` returned 0 instead
 of EBUSY. Capture: still 100% on the AP's channel. ftrace showed no driver
 function ran at all.
 
-**Gate 2 — mac80211.** `net/mac80211/iface.c:1403`:
+**Gate 2 - mac80211.** `net/mac80211/iface.c:1403`:
 
 ```c
 if (local->virt_monitors == 0 && local->open_count == 0)
@@ -223,7 +223,7 @@ association, `local->monitor_sdata` stays NULL, and
 return 0, never reach the driver. Patch 0003
 (`mac80211.monitor_concurrent=1`).
 
-**Gate 3 — the driver.** `mt7921_mcu_config_sniffer()` is reachable only
+**Gate 3 - the driver.** `mt7921_mcu_config_sniffer()` is reachable only
 from `->change_chanctx`, which a *newly created* context never triggers. So
 even with a monitor chanctx, the firmware was never told. Patch 0002 calls
 it from `->assign_vif_chanctx`.
@@ -253,7 +253,7 @@ else
         ret = 0;        /* second chanctx: accepted, ignored */
 ```
 
-A second chanctx is accepted and silently ignored — this chip's signature
+A second chanctx is accepted and silently ignored - this chip's signature
 failure mode, and the reason patch 0001 is opt-in: removing the check does
 not create multi-channel capability, it only stops the kernel refusing on
 your behalf.
@@ -278,9 +278,9 @@ suffices.
 
 Two facts make this cheap on this box:
 
-- `CONFIG_MODVERSIONS` is **off** — no symbol CRCs, so a rebuilt module only
+- `CONFIG_MODVERSIONS` is **off** - no symbol CRCs, so a rebuilt module only
   needs a matching vermagic string.
-- `CONFIG_MODULE_SIG_FORCE` is **off** — unsigned modules load (taint only).
+- `CONFIG_MODULE_SIG_FORCE` is **off** - unsigned modules load (taint only).
 
 `/` is at 95%, so build on `/mnt/shared`.
 
@@ -302,9 +302,9 @@ KBUILD_MODPOST_WARN=1 make -j16 M=net/wireless
 strip --strip-debug net/wireless/cfg80211.ko
 ```
 
-**Never build this directory twice without cleaning.** The obvious sequence —
+**Never build this directory twice without cleaning.** The obvious sequence -
 run `make M=net/wireless`, watch modpost fail on unresolved symbols, re-run
-it with `KBUILD_MODPOST_WARN=1` — produces a module that builds cleanly,
+it with `KBUILD_MODPOST_WARN=1` - produces a module that builds cleanly,
 passes `modinfo`, matches vermagic, and then dies at `insmod` with:
 
 ```
@@ -347,7 +347,7 @@ modules automatically** if the link has not returned within 45 s. Log:
 
 ## Gotcha that cost the most time: vermagic is necessary, not sufficient
 
-`MODVERSIONS` being off means no symbol CRCs — but it also means **nothing
+`MODVERSIONS` being off means no symbol CRCs - but it also means **nothing
 checks that your config matches the running kernel's**. Building with
 `CONFIG_DEBUG_INFO_BTF_MODULES` disabled removes four fields from
 `struct module`:
@@ -372,7 +372,7 @@ module: x86/modules: Invalid relocation target, existing value is nonzero for ty
 ```
 
 It affects **every** module built that way, not just the one you care about
-— verify with a throwaway like `crypto/michael_mic.ko`, which costs no
+- verify with a throwaway like `crypto/michael_mic.ko`, which costs no
 network. The `.ko` is clean on disk; the fault only appears at load.
 **Build with `/proc/config.gz` verbatim.** `pahole` is installed here, and
 module BTF generation skips itself gracefully when `vmlinux` is absent.
