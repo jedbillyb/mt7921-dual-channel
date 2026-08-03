@@ -1,4 +1,4 @@
-# mt7921-awdl-kernel
+# mt7921-dual-channel
 
 > **Unsupported personal project.** This is my own research, done on my own
 > laptop, published in case it is useful. It is not affiliated with the Open
@@ -6,11 +6,21 @@
 > warranty, and no promise that any of this works on your hardware or
 > regulatory domain. Issues and PRs may sit unread.
 >
+> **Despite "kernel" having been in an earlier name for this repo, this is
+> not a kernel fork.** There is no kernel source in this repo, and the
+> working solution runs on a completely stock, unpatched kernel. The
+> mechanism operates at the chanctx/vif plumbing layer inside
+> mac80211/mt7921, not via any modified kernel source. The only patched
+> component, at all, is hostapd
+> (`patches/0004-hostapd-p2p-go-iftype.patch`) - see below. Three other
+> patch files exist for an unrelated, **abandoned** kernel-side approach and
+> are kept only as a documented negative result; see "The dead end" below.
+>
 > The userspace side that actually uses this -
 > [`airdrop-mt7921`](https://github.com/jedbillyb/airdrop-mt7921) - and the
 > AWDL protocol engine - [`owl`](https://github.com/jedbillyb/owl) - are
-> separate repos. This one is kernel/driver-level: what makes a single MT7921
-> radio service two Wi-Fi channels at once in the first place.
+> separate repos. This one documents the mechanism: what makes a single
+> MT7921 radio service two Wi-Fi channels at once in the first place.
 
 > ## Solved 2026-08-03: Wi-Fi + AWDL on one MT7921, stock kernel
 >
@@ -38,13 +48,15 @@
 > parking, CSA, Opportunistic Power Save) live in `HANDOFF.md` - read that
 > first for anything beyond a summary.
 
-Kernel/driver-adjacent work to let a **single MT7921** do Wi-Fi and
+Driver/chanctx-level work to let a **single MT7921** do Wi-Fi and
 AWDL/AirDrop at the same time, with no second radio and no router
-configuration change beyond channel choice.
+configuration change beyond channel choice, and **no kernel patch at all**
+in the working route.
 
 Userspace AirDrop stack lives in [`airdrop-mt7921`](../airdrop-mt7921); this
-repo holds the patches, test scripts, and the build/load procedure for the
-(now superseded) kernel route, plus the hostapd patch for the working route.
+repo holds the one hostapd patch and test scripts for the working route, plus
+the (abandoned) kernel patches and build/load procedure kept only as a
+documented negative result - see "The dead end" below.
 
 ## The problem, restated
 
