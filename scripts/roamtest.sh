@@ -74,6 +74,9 @@ sudo sh -c "echo 0 > /sys/kernel/debug/ieee80211/$PHY/mt76/runtime-pm" 2>/dev/nu
 sudo sh -c "echo 0 > /sys/kernel/debug/ieee80211/$PHY/mt76/deep-sleep" 2>/dev/null
 echo "GO on 149, $MON aliased to $GOMAC" | tee -a "$RUN/run.log"
 
+echo "=== BEFORE roam: GO state ===" | tee -a "$RUN/run.log"
+iw dev $GO info 2>&1 | grep -E 'type|channel' | tee -a "$RUN/run.log"
+
 echo "=== ftrace: mac80211/mt7921 chanctx path ===" | tee -a "$RUN/run.log"
 sudo mount -t tracefs tracefs /sys/kernel/tracing 2>/dev/null
 sudo sh -c 'echo 0 > /sys/kernel/tracing/tracing_on'
@@ -124,13 +127,18 @@ T_REASSOC_DONE=$(date +%s)
 echo "T_REASSOC_DONE=$T_REASSOC_DONE (elapsed $((T_REASSOC_DONE - T_ROAM))s)" | tee -a "$RUN/run.log"
 echo "=== AFTER: STA state ===" | tee -a "$RUN/run.log"
 iw dev $STA link | tee -a "$RUN/run.log"
-echo "=== AFTER: GO state ===" | tee -a "$RUN/run.log"
+echo "=== AFTER roam: GO state ===" | tee -a "$RUN/run.log"
 iw dev $GO info 2>&1 | grep -E 'type|channel' | tee -a "$RUN/run.log"
+if ! iw dev $GO info 2>&1 | grep -q 'channel'; then
+  echo "  *** GO reports no channel after the roam - compare against BEFORE" \
+       "above; if BEFORE had one, the reassociation cost the GO its chanctx ***" \
+    | tee -a "$RUN/run.log"
+fi
 
 echo "=== post-roam window: ${POSTROAM_SECS}s ===" | tee -a "$RUN/run.log"
 sleep "$POSTROAM_SECS"
 
-sudo pkill -f "TD_TCPDUMP_MARKER_roamtest" 2>/dev/null
+[ -n "$TD" ] && sudo kill "$TD" 2>/dev/null
 sleep 1
 sudo sh -c 'echo 0 > /sys/kernel/tracing/tracing_on'
 sudo cat /sys/kernel/tracing/trace > "$RUN/ftrace.log" 2>/dev/null
