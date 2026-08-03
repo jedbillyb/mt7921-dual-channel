@@ -1,5 +1,17 @@
 # mt7921-awdl-kernel
 
+> **Unsupported personal project.** This is my own research, done on my own
+> laptop, published in case it is useful. It is not affiliated with the Open
+> Wireless Link project, OpenDrop, MediaTek, or Apple. There is no support, no
+> warranty, and no promise that any of this works on your hardware or
+> regulatory domain. Issues and PRs may sit unread.
+>
+> The userspace side that actually uses this —
+> [`airdrop-mt7921`](https://github.com/jedbillyb/airdrop-mt7921) — and the
+> AWDL protocol engine — [`owl`](https://github.com/jedbillyb/owl) — are
+> separate repos. This one is kernel/driver-level: what makes a single MT7921
+> radio service two Wi-Fi channels at once in the first place.
+
 > ## Solved 2026-08-03: Wi-Fi + AWDL on one MT7921, stock kernel
 >
 > A **P2P-GO vif + MAC-aliased monitor injection** gets simultaneous RX and TX
