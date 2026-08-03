@@ -41,6 +41,14 @@ restore() {
   sudo sh -c 'echo 0 > /sys/kernel/tracing/tracing_on' 2>/dev/null
   sudo sh -c 'echo nop > /sys/kernel/tracing/current_tracer' 2>/dev/null
   sudo sh -c 'echo > /sys/kernel/tracing/set_ftrace_filter' 2>/dev/null
+  # Safety net: if the STA isn't connected by the time we get here (autoconnect
+  # backed off, see the note above the disconnect call), don't leave the user
+  # stranded -- nudge it once more on the way out.
+  if ! iw dev $STA link 2>&1 | head -1 | grep -q "^Connected"; then
+    echo "*** $STA not connected at cleanup, nudging with nmcli device connect ***" \
+      | tee -a "$RUN/run.log"
+    sudo nmcli device connect $STA 2>&1 | tee -a "$RUN/run.log"
+  fi
   sudo chown -R "${SUDO_USER:-$(id -un)}" "$RUN" 2>/dev/null
   echo "RUNDIR=$RUN"
 }
@@ -108,23 +116,57 @@ else
   # wlp2s0 is NetworkManager-managed: only NM's own nl80211 socket is the
   # "owner" of the connection, so `iw dev disconnect` from this script gets
   # -EPERM. Go through NM instead, which does the real teardown/reassoc.
-  echo "=== reassoc: nmcli disconnect + reconnect to same profile ===" | tee -a "$RUN/run.log"
+  #
+  # Do NOT also call `nmcli device connect` here. An earlier version did, to
+  # force the reconnect rather than wait on autoconnect, and it raced NM's
+  # own autoconnect: NM logged "New connection activation was enqueued", the
+  # two activations collided, wlp2s0 associated for ~1s then deauthenticated
+  # again on its own, and autoconnect did NOT retry after that -- wifi stayed
+  # down until manually reconnected. `nmcli device disconnect` alone is
+  # sufficient; NM's autoconnect handles the reconnect on its own.
+  echo "=== reassoc: nmcli disconnect, wait for NM autoconnect ===" | tee -a "$RUN/run.log"
   sudo nmcli device disconnect $STA 2>&1 | tee -a "$RUN/run.log"
-  sleep 2
-  sudo nmcli device connect $STA 2>&1 | tee -a "$RUN/run.log"
 fi
 
-echo "=== polling $STA for up to ${REASSOC_TIMEOUT}s ===" | tee -a "$RUN/run.log"
+echo "=== polling $STA for up to ${REASSOC_TIMEOUT}s (must read Connected 3x in a" \
+     "row, 1s apart, before this counts -- a single read can catch a connection" \
+     "that drops again a second later, see note above) ===" | tee -a "$RUN/run.log"
 i=0
+STABLE=0
+RETRIED=0
 while [ $i -lt $((REASSOC_TIMEOUT * 2)) ]; do
   STATE=$(iw dev $STA link 2>&1 | head -1)
   echo "$(date +%s.%N) $STATE" >> "$RUN/sta-poll.log"
-  echo "$STATE" | grep -q "^Connected" && break
+  if echo "$STATE" | grep -q "^Connected"; then
+    STABLE=$((STABLE+1))
+    [ $STABLE -ge 3 ] && break
+    sleep 1
+    i=$((i+2))
+    continue
+  fi
+  STABLE=0
+  # halfway through the timeout with no stable connection: NM's autoconnect
+  # may have backed off (as it did the time this raced, see above). Give it
+  # one explicit nudge, but only once, and not stacked on the disconnect
+  # above -- this is a fallback, not the normal path.
+  if [ $RETRIED -eq 0 ] && [ $i -ge $REASSOC_TIMEOUT ]; then
+    echo "=== no stable reconnect at ${REASSOC_TIMEOUT}s in, nudging with nmcli device connect ===" \
+      | tee -a "$RUN/run.log"
+    sudo nmcli device connect $STA 2>&1 | tee -a "$RUN/run.log"
+    RETRIED=1
+  fi
   sleep 0.5
   i=$((i+1))
 done
 T_REASSOC_DONE=$(date +%s)
-echo "T_REASSOC_DONE=$T_REASSOC_DONE (elapsed $((T_REASSOC_DONE - T_ROAM))s)" | tee -a "$RUN/run.log"
+if [ $STABLE -ge 3 ]; then
+  echo "T_REASSOC_DONE=$T_REASSOC_DONE (elapsed $((T_REASSOC_DONE - T_ROAM))s, stable)" \
+    | tee -a "$RUN/run.log"
+else
+  echo "T_REASSOC_DONE=$T_REASSOC_DONE (elapsed $((T_REASSOC_DONE - T_ROAM))s, *** NOT" \
+       "confirmed stable -- check sta-poll.log and consider reconnecting manually ***)" \
+    | tee -a "$RUN/run.log"
+fi
 echo "=== AFTER: STA state ===" | tee -a "$RUN/run.log"
 iw dev $STA link | tee -a "$RUN/run.log"
 echo "=== AFTER roam: GO state ===" | tee -a "$RUN/run.log"
