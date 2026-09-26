@@ -1,5 +1,11 @@
 # Handoff — session of 2026-08-03
 
+> **Snapshot from 2026-08-03, kept as written.** Local paths and "State of the
+> machine" describe the author's laptop that day. The mechanism has since been
+> built into `airdropd` in
+> [airdrop-mt7921](https://github.com/jedbillyb/airdrop-mt7921); see the
+> README here for the current summary.
+
 Read this first, then `README.md`. Companion userspace project is
 `/mnt/shared/projects/airdrop-mt7921` (FINDINGS §43–§46).
 

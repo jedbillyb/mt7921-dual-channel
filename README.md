@@ -44,6 +44,13 @@
 > negative result.** See "The dead end: monitor-vif retuning" below for the
 > full analysis.
 >
+> **Since then:** this mechanism ships in `airdrop-mt7921` as `airdropd`'s
+> P2P-GO mode (`AIRDROP_DUALCHAN=1`, what its waybar switch runs). There it has
+> carried a real transfer to 99.1% on the MT7921 with Wi-Fi up, and complete
+> receives and sends on a contributor's MT7922. Current status and open faults
+> are in its
+> [daemon/README.md](https://github.com/jedbillyb/airdrop-mt7921/blob/main/daemon/README.md#limitations).
+>
 > Full session detail, open items, and the next-step plans (slot-8 zero-cost
 > parking, CSA, Opportunistic Power Save) live in `HANDOFF.md` - read that
 > first for anything beyond a summary.
@@ -53,7 +60,7 @@ AWDL/AirDrop at the same time, with no second radio and no router
 configuration change beyond channel choice, and **no kernel patch at all**
 in the working route.
 
-Userspace AirDrop stack lives in [`airdrop-mt7921`](../airdrop-mt7921); this
+Userspace AirDrop stack lives in [`airdrop-mt7921`](https://github.com/jedbillyb/airdrop-mt7921); this
 repo holds the one hostapd patch and test scripts for the working route, plus
 the (abandoned) kernel patches and build/load procedure kept only as a
 documented negative result - see "The dead end" below.
